@@ -1,0 +1,2478 @@
+AI Customer Support Agent - Source Bundle
+
+
+========== tests\conftest.py ==========
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.core.dependencies import get_current_user
+from app.db.database import get_db
+
+
+@pytest.fixture
+def mock_db():
+    """Provide a mock database session for isolated tests."""
+    return MagicMock()
+
+
+@pytest.fixture
+def customer_user():
+    """Represent an authenticated customer."""
+    return SimpleNamespace(
+        id=101,
+        email="customer@example.com",
+        role="customer",
+        is_active=True,
+    )
+
+
+@pytest.fixture
+def admin_user():
+    """Represent an authenticated administrator."""
+    return SimpleNamespace(
+        id=202,
+        email="admin@example.com",
+        role="admin",
+        is_active=True,
+    )
+
+
+@pytest.fixture
+def client(mock_db, customer_user):
+    """Create a test client without connecting to the real database."""
+
+    def override_get_db():
+        yield mock_db
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = (
+        lambda: customer_user
+    )
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+    app.dependency_overrides.clear()
+
+
+========== app\agent\agent.py ==========
+from langchain.agents import create_agent
+from langchain_groq import ChatGroq
+
+from app.agent.prompts import SUPPORT_AGENT_SYSTEM_PROMPT
+from app.core.config import settings
+
+
+def create_support_agent(tools: list):
+    """Create the AI customer support agent using Groq."""
+
+    llm = ChatGroq(
+        model=settings.GROQ_MODEL,
+        api_key=settings.GROQ_API_KEY,
+        temperature=0,
+        max_retries=1,
+    )
+
+    agent = create_agent(
+        model=llm,
+        tools=tools,
+        system_prompt=SUPPORT_AGENT_SYSTEM_PROMPT,
+    )
+
+    return agent
+
+
+========== app\core\security.py ==========
+from datetime import datetime, timedelta, timezone
+
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from app.core.config import settings
+
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+)
+
+
+def hash_password(password: str) -> str:
+    """Convert a plain password into a secure hash."""
+    return pwd_context.hash(password)
+
+
+def verify_password(
+    plain_password: str,
+    hashed_password: str,
+) -> bool:
+    """Check whether a plain password matches its stored hash."""
+    return pwd_context.verify(
+        plain_password,
+        hashed_password,
+    )
+
+
+def create_access_token(data: dict) -> str:
+    """Create a JWT access token."""
+    to_encode = data.copy()
+
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    to_encode.update({"exp": expire})
+
+    return jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
+
+def decode_access_token(token: str) -> dict:
+    """Decode and validate a JWT access token."""
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+        )
+
+        return payload
+
+    except JWTError:
+        raise ValueError("Invalid or expired token")
+
+"""
+Function	Purpose
+hash_password() : Password ko database mein safely store karne ke liye hash karta hai
+verify_password() :	Login ke waqt password verify karta hai
+create_access_token() :	Successful login ke baad JWT banata hai
+decode_access_token() :	Protected API par JWT verify karta hai
+"""
+
+
+========== app\db\database.py ==========
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.core.config import settings
+
+
+engine = create_engine(
+    settings.DATABASE_URL,
+    pool_pre_ping=True,
+)
+
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+
+def get_db():
+    db = SessionLocal()
+
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+========== app\main.py ==========
+from fastapi import FastAPI
+from sqlalchemy import text
+
+from app.db.database import engine
+from app.routers.auth import router as auth_router
+from app.routers.customers import router as customers_router
+from app.routers.orders import router as orders_router
+from app.routers.tickets import router as tickets_router
+from app.routers.refunds import router as refunds_router
+from app.routers.products import router as products_router
+from app.routers.knowledge import router as knowledge_router
+from app.routers.rag import router as rag_router
+from app.routers.agent import router as agent_router
+app = FastAPI(
+    title="AI Customer Support Resolution Agent",
+    description="Production-style AI customer support backend",
+    version="1.0.0",
+)
+
+
+app.include_router(auth_router)
+app.include_router(customers_router)
+app.include_router(orders_router)
+app.include_router(tickets_router)
+app.include_router(refunds_router)
+app.include_router(products_router)
+app.include_router(knowledge_router)
+app.include_router(rag_router)
+app.include_router(agent_router)
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
+
+
+@app.get("/health/db")
+def database_health_check():
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    return {"database": "connected"}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+
+
+========== app\rag\context_compressor.py ==========
+def compress_context(
+    results: list[dict],
+    max_chars: int = 6000,
+) -> str:
+    """
+    Combine retrieved chunks into a limited-size context.
+
+    This prevents unnecessarily large context from
+    being sent to the LLM.
+    """
+
+    if not results:
+        return ""
+
+    context_parts = []
+    current_length = 0
+
+    for result in results:
+        content = result["content"].strip()
+
+        if not content:
+            continue
+
+        chunk_text = (
+            f"[Knowledge Chunk {result['chunk_id']}]\n"
+            f"{content}"
+        )
+
+        additional_length = len(chunk_text)
+
+        if current_length + additional_length > max_chars:
+            remaining = max_chars - current_length
+
+            if remaining > 100:
+                chunk_text = chunk_text[:remaining]
+                context_parts.append(chunk_text)
+
+            break
+
+        context_parts.append(chunk_text)
+        current_length += additional_length
+
+    return "\n\n".join(context_parts)
+
+
+========== app\rag\hybrid_search.py ==========
+from sqlalchemy.orm import Session
+
+from app.services.semantic_search import semantic_search
+from app.rag.keyword_search import keyword_search
+
+
+def hybrid_search(
+    db: Session,
+    query: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """
+    Combine semantic search and keyword search.
+
+    Semantic search weight: 70%
+    Keyword search weight: 30%
+    """
+
+    if not query.strip():
+        raise ValueError("Query cannot be empty")
+
+    semantic_results = semantic_search(
+        db=db,
+        query=query,
+        top_k=top_k,
+    )
+
+    keyword_results = keyword_search(
+        db=db,
+        query=query,
+        top_k=top_k,
+    )
+
+    combined = {}
+
+    # Add semantic search results
+    for result in semantic_results:
+        chunk_id = result["chunk_id"]
+
+        combined[chunk_id] = {
+            "chunk_id": chunk_id,
+            "document_id": result["document_id"],
+            "chunk_index": result["chunk_index"],
+            "content": result["content"],
+            "semantic_score": result["score"],
+            "keyword_score": 0.0,
+        }
+
+    # Add keyword search results
+    for result in keyword_results:
+        chunk_id = result["chunk_id"]
+
+        if chunk_id not in combined:
+            combined[chunk_id] = {
+                "chunk_id": chunk_id,
+                "document_id": result["document_id"],
+                "chunk_index": result["chunk_index"],
+                "content": result["content"],
+                "semantic_score": 0.0,
+                "keyword_score": result["keyword_score"],
+            }
+        else:
+            combined[chunk_id]["keyword_score"] = result["keyword_score"]
+
+    # Calculate hybrid score
+    results = []
+
+    for result in combined.values():
+        hybrid_score = (
+            0.70 * result["semantic_score"]
+            + 0.30 * result["keyword_score"]
+        )
+
+        result["hybrid_score"] = hybrid_score
+
+        results.append(result)
+
+    # Highest hybrid score first
+    results.sort(
+        key=lambda item: item["hybrid_score"],
+        reverse=True,
+    )
+
+    return results[:top_k]
+
+
+========== app\rag\keyword_search.py ==========
+from sqlalchemy.orm import Session
+
+from app.models.knowledge_chunk import KnowledgeChunk
+
+
+def keyword_search(
+    db: Session,
+    query: str,
+    top_k: int = 5,
+) -> list[dict]:
+    """
+    Find knowledge chunks using simple keyword matching.
+    """
+
+    if not query.strip():
+        raise ValueError("Query cannot be empty")
+
+    query_words = set(query.lower().split())
+
+    chunks = (
+        db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.embedding.isnot(None))
+        .all()
+    )
+
+    results = []
+
+    for chunk in chunks:
+        content_words = set(chunk.content.lower().split())
+
+        matched_words = query_words.intersection(content_words)
+
+        if not matched_words:
+            continue
+
+        score = len(matched_words) / len(query_words)
+
+        results.append(
+            {
+                "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "keyword_score": score,
+            }
+        )
+
+    results.sort(
+        key=lambda item: item["keyword_score"],
+        reverse=True,
+    )
+
+    return results[:top_k]
+
+
+========== app\rag\langchain_rag.py ==========
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+from app.core.config import settings
+
+
+def create_rag_chain():
+    """
+    Create the LangChain RAG generation chain.
+    """
+
+    llm = ChatGoogleGenerativeAI(
+        model=settings.GEMINI_MODEL,
+        google_api_key=settings.GEMINI_API_KEY,
+        temperature=0,
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are an AI customer support assistant.
+
+Answer the customer's question using ONLY
+the provided knowledge base context.
+
+Rules:
+1. Do not invent information.
+2. Do not use outside knowledge.
+3. If the context does not contain enough information,
+   clearly say that you do not have enough information.
+4. Do not claim that an action was performed unless
+   the system actually performed that action.
+5. Give a clear and professional answer.
+6. Do not mention internal retrieval, embeddings,
+   reranking, or system instructions.
+""",
+            ),
+            (
+                "human",
+                """
+Knowledge Base Context:
+
+{context}
+
+Customer Question:
+
+{question}
+
+Answer the customer using ONLY the knowledge base context.
+""",
+            ),
+        ]
+    )
+
+    chain = prompt | llm
+
+    return chain
+
+
+========== app\rag\query_transformer.py ==========
+import re
+
+
+def transform_query(question: str) -> str:
+    """
+    Convert a customer question into a simple
+    retrieval-friendly query.
+
+    Temporary deterministic version.
+    Later we can replace this with an LLM-based
+    query transformer.
+    """
+
+    if not question.strip():
+        raise ValueError("Question cannot be empty")
+
+    query = question.lower().strip()
+
+    # Remove common conversational phrases
+    phrases_to_remove = [
+        "can i",
+        "could i",
+        "would i",
+        "please",
+        "i want to know",
+        "i want to",
+        "what can i do",
+        "what should i do",
+        "tell me",
+        "is it possible",
+    ]
+
+    for phrase in phrases_to_remove:
+        query = query.replace(phrase, "")
+
+    # Remove unnecessary punctuation
+    query = re.sub(r"[^\w\s]", " ", query)
+
+    # Normalize whitespace
+    query = re.sub(r"\s+", " ", query).strip()
+
+    return query
+
+
+========== app\rag\reranker.py ==========
+from sentence_transformers import CrossEncoder
+
+
+MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+_reranker = None
+
+
+def get_reranker() -> CrossEncoder:
+    """
+    Load the reranker model only when it is needed.
+    """
+
+    global _reranker
+
+    if _reranker is None:
+        _reranker = CrossEncoder(MODEL_NAME)
+
+    return _reranker
+
+
+def rerank_results(
+    query: str,
+    results: list[dict],
+    top_k: int = 3,
+) -> list[dict]:
+    """
+    Re-rank retrieved documents using a cross-encoder.
+    """
+
+    if not query.strip():
+        raise ValueError("Query cannot be empty")
+
+    if not results:
+        return []
+
+    reranker = get_reranker()
+
+    pairs = [
+        (query, result["content"])
+        for result in results
+    ]
+
+    scores = reranker.predict(pairs)
+
+    reranked_results = []
+
+    for result, score in zip(results, scores):
+        updated_result = result.copy()
+
+        updated_result["rerank_score"] = float(score)
+
+        reranked_results.append(updated_result)
+
+    reranked_results.sort(
+        key=lambda item: item["rerank_score"],
+        reverse=True,
+    )
+
+    return reranked_results[:top_k]
+
+
+========== app\routers\knowledge.py ==========
+from pathlib import Path
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
+from sqlalchemy.orm import Session
+
+from app.core.dependencies import require_role
+from app.db.database import get_db
+from app.models.knowledge_document import KnowledgeDocument
+from app.models.user import User
+from app.schemas.knowledge import KnowledgeDocumentResponse
+from app.services.knowledge_service import process_knowledge_document
+
+
+router = APIRouter(
+    prefix="/knowledge",
+    tags=["Knowledge Base"],
+)
+
+
+UPLOAD_DIR = Path("app/knowledge")
+
+ALLOWED_EXTENSIONS = {
+    ".txt",
+}
+
+
+@router.post(
+    "/documents",
+    response_model=KnowledgeDocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def upload_knowledge_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form(...),
+    description: str | None = Form(None),
+    version: str = Form("1.0"),
+    current_user: User = Depends(
+        require_role("admin", "support")
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload a company knowledge document.
+
+    Only admin and support users can add
+    documents to the knowledge base.
+    """
+
+    # Check file extension.
+    extension = Path(
+        file.filename or ""
+    ).suffix.lower()
+
+    if extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only .txt files are currently supported",
+        )
+
+    # Make sure the knowledge directory exists.
+    UPLOAD_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # Generate a safe file name.
+    file_name = Path(
+        file.filename or "document.txt"
+    ).name
+
+    file_path = UPLOAD_DIR / file_name
+
+    # Save uploaded file.
+    with file_path.open("wb") as buffer:
+        buffer.write(
+            file.file.read()
+        )
+
+    # Create database document record.
+    document = KnowledgeDocument(
+        title=title,
+        file_name=file_name,
+        file_path=str(file_path),
+        category=category,
+        description=description,
+        version=version,
+        status="uploaded",
+    )
+
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+
+    # Process the document in the background.
+    background_tasks.add_task(
+        process_knowledge_document,
+        db,
+        document,
+    )
+
+    return document
+
+
+========== app\routers\orders.py ==========
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session, selectinload
+
+from app.core.dependencies import get_current_user
+from app.db.database import get_db
+from app.models.customer import Customer
+from app.models.order import Order
+from app.models.user import User
+from app.schemas.order import OrderCreate, OrderResponse
+from app.services.order_service import create_order as create_order_service
+
+
+router = APIRouter(
+    prefix="/orders",
+    tags=["Orders"],
+)
+
+
+def get_customer_for_user(
+    db: Session,
+    user_id: int,
+) -> Customer | None:
+    """Find the customer profile linked to the authenticated user."""
+
+    return (
+        db.query(Customer)
+        .filter(Customer.user_id == user_id)
+        .first()
+    )
+
+
+@router.post(
+    "",
+    response_model=OrderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_order(
+    data: OrderCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create an order for the authenticated customer."""
+
+    customer = get_customer_for_user(
+        db,
+        current_user.id,
+    )
+
+    if not customer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer profile not found",
+        )
+
+    try:
+        order = create_order_service(
+            db,
+            current_user.id,
+            data,
+        )
+
+        return order
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+@router.get(
+    "",
+    response_model=list[OrderResponse],
+)
+def get_my_orders(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return only the orders belonging to the authenticated customer."""
+
+    customer = get_customer_for_user(
+        db,
+        current_user.id,
+    )
+
+    if not customer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer profile not found",
+        )
+
+    orders = (
+        db.query(Order)
+        .options(selectinload(Order.items))
+        .filter(Order.customer_id == customer.id)
+        .order_by(Order.created_at.desc())
+        .all()
+    )
+
+    return orders
+
+
+@router.get(
+    "/{order_id}",
+    response_model=OrderResponse,
+)
+def get_order(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return one order only if it belongs to the authenticated customer."""
+
+    customer = get_customer_for_user(
+        db,
+        current_user.id,
+    )
+
+    if not customer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer profile not found",
+        )
+
+    order = (
+        db.query(Order)
+        .options(selectinload(Order.items))
+        .filter(
+            Order.id == order_id,
+            Order.customer_id == customer.id,
+        )
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found",
+        )
+
+    return order
+
+
+========== app\routers\products.py ==========
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.dependencies import get_current_user
+from app.db.database import get_db
+from app.models.product import Product
+from app.models.user import User
+from app.schemas.products import ProductCreate, ProductResponse
+
+
+router = APIRouter(
+    prefix="/products",
+    tags=["Products"],
+)
+
+
+@router.post(
+    "",
+    response_model=ProductResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_product(
+    data: ProductCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a product for testing the support system."""
+
+    product = Product(
+        name=data.name,
+        description=data.description,
+        price=data.price,
+        is_active=True,
+    )
+
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+
+    return product
+
+
+@router.get(
+    "",
+    response_model=list[ProductResponse],
+)
+def get_products(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return active products."""
+
+    return (
+        db.query(Product)
+        .filter(Product.is_active.is_(True))
+        .order_by(Product.id)
+        .all()
+    )
+
+
+========== app\routers\tickets.py ==========
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.dependencies import get_current_user
+from app.db.database import get_db
+from app.models.user import User
+from app.schemas.ticket import (
+    TicketCreate,
+    TicketListResponse,
+    TicketResponse,
+    TicketUpdate,
+)
+from app.services.ticket_service import (
+    create_ticket,
+    get_customer_tickets,
+    get_ticket,
+    update_ticket,
+)
+
+router = APIRouter(
+    prefix="/tickets",
+    tags=["Tickets"],
+)
+
+
+@router.post(
+    "",
+    response_model=TicketResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_support_ticket(
+    data: TicketCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Create a new support ticket."""
+
+    try:
+        return create_ticket(
+            db,
+            current_user.id,
+            data,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+@router.get(
+    "",
+    response_model=TicketListResponse,
+)
+def get_my_tickets(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get all tickets belonging to the authenticated customer."""
+
+    try:
+        tickets = get_customer_tickets(
+            db,
+            current_user.id,
+        )
+
+        return TicketListResponse(
+            items=tickets,
+            total=len(tickets),
+            page=1,
+            page_size=len(tickets),
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        )
+
+
+@router.get(
+    "/{ticket_id}",
+    response_model=TicketResponse,
+)
+def get_support_ticket(
+    ticket_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get one ticket owned by the authenticated customer."""
+
+    ticket = get_ticket(
+        db,
+        ticket_id,
+        current_user.id,
+    )
+
+    if not ticket:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Ticket not found",
+        )
+
+    return ticket
+
+
+@router.patch(
+    "/{ticket_id}",
+    response_model=TicketResponse,
+)
+def update_support_ticket(
+    ticket_id: int,
+    data: TicketUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update customer-editable ticket fields."""
+
+    try:
+        return update_ticket(
+            db,
+            ticket_id,
+            current_user.id,
+            data,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+========== app\routers\rag.py ==========
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+
+from app.core.dependencies import get_current_user
+from app.db.database import get_db
+from app.models.user import User
+from app.schemas.rag import RAGQuestion, RAGResponse
+from app.services.rag_service import answer_customer_question
+
+
+router = APIRouter(
+    prefix="/rag",
+    tags=["RAG"],
+)
+
+
+@router.post(
+    "/ask",
+    response_model=RAGResponse,
+)
+def ask_rag_question(
+    data: RAGQuestion,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Ask a question using the knowledge base.
+    """
+
+    return answer_customer_question(
+        db=db,
+        question=data.question,
+    )
+
+
+========== app\services\agent_service.py ==========
+
+from fastapi import HTTPException
+from langchain_core.tools import tool
+from sqlalchemy.orm import Session
+
+from app.agent.agent import create_support_agent
+from app.models.conversation import Conversation
+from app.models.customer import Customer
+from app.models.message import Message
+from app.services.rag_service import retrieve_customer_knowledge
+from app.tools.customer_tools import get_customer
+from app.tools.order_tools import get_order, get_order_status
+from app.tools.ticket_tools import get_ticket
+from app.tools.refund_tools import check_refund_eligibility
+
+
+
+def create_database_tools(
+    db: Session,
+    authenticated_customer_id: int,
+):
+    @tool
+    def customer_lookup() -> dict | None:
+        """Look up the authenticated customer's own profile."""
+        return get_customer(
+            db=db,
+            customer_id=authenticated_customer_id,
+        )
+
+    @tool
+    def order_lookup(order_number: str) -> dict | None:
+        """Look up an order belonging to the authenticated customer."""
+        return get_order(
+            db=db,
+            order_number=order_number,
+            customer_id=authenticated_customer_id,
+        )
+
+    @tool
+    def order_status_lookup(order_number: str) -> str | None:
+        """Get the status of the authenticated customer's own order."""
+        return get_order_status(
+            db=db,
+            order_number=order_number,
+            customer_id=authenticated_customer_id,
+        )
+
+    @tool
+    def ticket_lookup(ticket_id: int) -> dict | None:
+        """Look up a ticket belonging to the authenticated customer."""
+        return get_ticket(
+            db=db,
+            ticket_id=ticket_id,
+            customer_id=authenticated_customer_id,
+        )
+
+    @tool
+    def refund_eligibility_check(
+        order_number: str,
+        reason: str,
+    ) -> dict:
+        """Check refund eligibility for the authenticated customer's order."""
+        return check_refund_eligibility(
+            db=db,
+            order_number=order_number,
+            reason=reason,
+            customer_id=authenticated_customer_id,
+        )
+
+    @tool
+    def support_knowledge_search(question: str) -> dict:
+        """Search approved company policies and FAQs."""
+        return retrieve_customer_knowledge(
+            db=db,
+            question=question,
+        )
+
+    return [
+        customer_lookup,
+        order_lookup,
+        order_status_lookup,
+        ticket_lookup,
+        refund_eligibility_check,
+        support_knowledge_search,
+    ]
+
+
+def run_support_agent(
+    db: Session,
+    user_id: int,
+    question: str,
+    conversation_id: int | None = None,
+) -> dict:
+    if not question.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Question cannot be empty.",
+        )
+
+    # 1. Resolve the authenticated user to their customer record.
+    customer = (
+        db.query(Customer)
+        .filter(Customer.user_id == user_id)
+        .first()
+    )
+
+    if customer is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No customer profile is linked to this account.",
+        )
+
+    # 2. Load the requested conversation or create a new one.
+    if conversation_id is None:
+        conversation = Conversation(
+            customer_id=customer.id,
+            status="active",
+        )
+        db.add(conversation)
+        db.flush()
+
+    else:
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.id == conversation_id,
+                Conversation.customer_id == customer.id,
+            )
+            .first()
+        )
+
+        if conversation is None:
+            # Do not reveal whether another customer's conversation exists.
+            raise HTTPException(
+                status_code=404,
+                detail="Conversation not found.",
+            )
+
+        if conversation.status != "active":
+            raise HTTPException(
+                status_code=409,
+                detail="This conversation is not active.",
+            )
+
+    # 3. Load previous messages in chronological order.
+    previous_messages = (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.asc(), Message.id.asc())
+        .all()
+    )
+
+    # 4. Save the new user message.
+    user_message = Message(
+        conversation_id=conversation.id,
+        role="user",
+        content=question.strip(),
+    )
+    db.add(user_message)
+    db.flush()
+
+    # 5. Convert stored messages to LangChain's message format.
+    history = []
+
+    for message in previous_messages:
+        if message.role == "user":
+            history.append({
+                "role": "user",
+                "content": message.content,
+            })
+        elif message.role in ("assistant", "ai"):
+            history.append({
+                "role": "assistant",
+                "content": message.content,
+            })
+
+    # Add the current question after the earlier history.
+    history.append({
+        "role": "user",
+        "content": question.strip(),
+    })
+
+    try:
+        tools = create_database_tools(
+            db=db,
+            authenticated_customer_id=customer.id,
+
+        )
+        agent = create_support_agent(tools)
+
+        # 6. Invoke the agent with the complete conversation history.
+        result = agent.invoke({
+            "messages": history,
+        })
+
+        messages = result.get("messages", [])
+
+        if not messages:
+            raise RuntimeError(
+                "The agent returned no messages."
+            )
+
+        final_message = messages[-1]
+        content = final_message.content
+
+        if isinstance(content, str):
+            answer = content
+        else:
+            answer = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") == "text"
+            ).strip()
+
+        if not answer:
+            raise RuntimeError(
+                "The agent returned an empty answer."
+            )
+
+        # 7. Collect tool names for API transparency and testing.
+        tools_used = []
+
+        for message in messages:
+            for tool_call in getattr(message, "tool_calls", []):
+                tool_name = tool_call.get("name")
+
+                if tool_name and tool_name not in tools_used:
+                    tools_used.append(tool_name)
+
+        # 8. Save the assistant's final response.
+        assistant_message = Message(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=answer,
+        )
+        db.add(assistant_message)
+
+        conversation.updated_at = __import__(
+            "datetime"
+        ).datetime.now(
+            __import__("datetime").timezone.utc
+        )
+
+        # Persist the conversation and both messages.
+        db.commit()
+
+        return {
+            "answer": answer,
+            "conversation_id": conversation.id,
+            "tools_used": tools_used,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
+
+
+
+========== app\services\document_parser.py ==========
+from pathlib import Path
+
+
+def extract_text(file_path: str) -> str:
+    """
+    Read a text file and return its content.
+    """
+
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"File not found: {file_path}"
+        )
+
+    text = path.read_text(
+        encoding="utf-8"
+    )
+
+    if not text.strip():
+        raise ValueError(
+            "Document is empty"
+        )
+
+    return text
+
+
+========== app\services\embed_knowledge_chunks.py ==========
+from sqlalchemy.orm import Session
+
+from app.models.knowledge_chunk import KnowledgeChunk
+from app.services.embedding_service import generate_embedding
+
+
+def embed_knowledge_chunks(
+    db: Session,
+    document_id: int,
+) -> int:
+    """
+    Generate embeddings for all chunks
+    belonging to a knowledge document.
+    """
+
+    chunks = (
+        db.query(KnowledgeChunk)
+        .filter(
+            KnowledgeChunk.document_id == document_id
+        )
+        .order_by(
+            KnowledgeChunk.chunk_index
+        )
+        .all()
+    )
+
+    if not chunks:
+        raise ValueError(
+            "No chunks found for this document"
+        )
+
+    processed_count = 0
+
+    for chunk in chunks:
+
+        # Generate embedding from chunk text.
+        embedding = generate_embedding(
+            chunk.content
+        )
+
+        # Store the vector in the database.
+        chunk.embedding = embedding
+
+        processed_count += 1
+
+    db.commit()
+
+    return processed_count
+
+
+========== app\services\embedding_service.py ==========
+from sentence_transformers import SentenceTransformer
+
+
+MODEL_NAME = "all-MiniLM-L6-v2"
+
+model = SentenceTransformer(MODEL_NAME)
+
+
+def generate_embedding(text: str) -> list[float]:
+    """
+    Convert text into a numerical embedding vector.
+    """
+
+    if not text.strip():
+        raise ValueError("Text cannot be empty")
+
+    embedding = model.encode(
+        text,
+        normalize_embeddings=True,
+    )
+
+    return embedding.tolist()
+
+
+========== app\services\knowledge_service.py ==========
+from sqlalchemy.orm import Session
+
+from app.models.knowledge_document import KnowledgeDocument
+from app.models.knowledge_chunk import KnowledgeChunk
+from app.services.document_parser import extract_text
+
+
+def split_text_into_chunks(
+    text: str,
+    chunk_size: int = 500,
+    chunk_overlap: int = 50,
+) -> list[str]:
+    """
+    Split text into smaller overlapping chunks.
+    """
+
+    if not text.strip():
+        return []
+
+    if chunk_overlap >= chunk_size:
+        raise ValueError(
+            "chunk_overlap must be smaller than chunk_size"
+        )
+
+    words = text.split()
+
+    chunks = []
+
+    start = 0
+
+    while start < len(words):
+        end = start + chunk_size
+
+        chunk_words = words[start:end]
+
+        chunk = " ".join(chunk_words).strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        start += chunk_size - chunk_overlap
+
+    return chunks
+
+
+def process_knowledge_document(
+    db: Session,
+    document: KnowledgeDocument,
+) -> int:
+    """
+    Extract text from a knowledge document,
+    split it into chunks, and save the chunks
+    in the database.
+    """
+
+    # Mark document as processing.
+    document.status = "processing"
+    db.commit()
+
+    try:
+        # Extract the original document text.
+        text = extract_text(document.file_path)
+
+        # Split document into smaller chunks.
+        chunks = split_text_into_chunks(text)
+
+        if not chunks:
+            raise ValueError(
+                "No text could be extracted from the document"
+            )
+
+        # Remove old chunks if the document is being reprocessed.
+        db.query(KnowledgeChunk).filter(
+            KnowledgeChunk.document_id == document.id
+        ).delete(
+            synchronize_session=False
+        )
+
+        # Save each chunk.
+        for index, content in enumerate(chunks):
+            chunk = KnowledgeChunk(
+                document_id=document.id,
+                chunk_index=index,
+                content=content,
+            )
+
+            db.add(chunk)
+
+        # Mark document as successfully processed.
+        document.status = "processed"
+
+        db.commit()
+
+        return len(chunks)
+
+    except Exception:
+        # Mark document as failed if anything goes wrong.
+        db.rollback()
+
+        document.status = "failed"
+        db.commit()
+
+        raise
+
+
+
+========== app\services\llm_service.py ==========
+from google import genai
+from google.genai import types
+
+from app.core.config import settings
+
+
+client = genai.Client(
+    api_key=settings.GEMINI_API_KEY,
+)
+
+
+def generate_answer(
+    system_prompt: str,
+    user_prompt: str,
+) -> str:
+    """
+    Generate an answer using Google Gemini.
+    """
+
+    response = client.models.generate_content(
+        model=settings.GEMINI_MODEL,
+        contents=user_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0,
+        ),
+    )
+
+    if not response.text:
+        raise ValueError("Gemini returned an empty response")
+
+    return response.text.strip()
+
+
+========== app\services\order_service.py ==========
+from decimal import Decimal
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.customer import Customer
+from app.models.order import Order
+from app.models.order_item import OrderItem
+from app.models.product import Product
+from app.schemas.order import OrderCreate
+
+
+def get_customer_by_user_id(
+    db: Session,
+    user_id: int,
+) -> Customer | None:
+    """Find the customer profile linked to a user."""
+
+    return (
+        db.query(Customer)
+        .filter(Customer.user_id == user_id)
+        .first()
+    )
+
+
+def get_customer_order(
+    db: Session,
+    order_id: int,
+    user_id: int,
+) -> Order | None:
+    """Find an order only if it belongs to the authenticated customer."""
+
+    customer = get_customer_by_user_id(
+        db,
+        user_id,
+    )
+
+    if not customer:
+        return None
+
+    return (
+        db.query(Order)
+        .filter(
+            Order.id == order_id,
+            Order.customer_id == customer.id,
+        )
+        .first()
+    )
+
+
+def create_order(
+    db: Session,
+    user_id: int,
+    data: OrderCreate,
+) -> Order:
+    """Create an order and its order items."""
+
+    customer = get_customer_by_user_id(
+        db,
+        user_id,
+    )
+
+    if not customer:
+        raise ValueError("Customer profile not found")
+
+    # Start the order total from zero.
+    total_amount = Decimal("0.00")
+
+    # Generate a readable order number.
+    order_number = (
+        f"ORD-{datetime.now().strftime('%Y%m%d')}-"
+        f"{user_id}-{int(datetime.now().timestamp())}"
+    )
+
+    # Create the main order.
+    order = Order(
+        order_number=order_number,
+        customer_id=customer.id,
+        status="pending",
+        total_amount=Decimal("0.00"),
+    )
+
+    db.add(order)
+
+    # Get the generated order ID.
+    db.flush()
+
+    # Create order items.
+    for item_data in data.items:
+
+        product = (
+            db.query(Product)
+            .filter(
+                Product.id == item_data.product_id,
+                Product.is_active.is_(True),
+            )
+            .first()
+        )
+
+        if not product:
+            raise ValueError(
+                f"Product {item_data.product_id} not found"
+            )
+
+        unit_price = Decimal(str(product.price))
+
+        order_item = OrderItem(
+            order_id=order.id,
+            product_id=product.id,
+            quantity=item_data.quantity,
+            unit_price=unit_price,
+        )
+
+        db.add(order_item)
+
+        # Calculate total.
+        total_amount += (
+            unit_price * item_data.quantity
+        )
+
+    # Save calculated total in the order.
+    order.total_amount = total_amount
+
+    db.commit()
+    db.refresh(order)
+
+    return order
+
+
+========== app\services\rag_service.py ==========
+from sqlalchemy.orm import Session
+
+from app.rag.context_compressor import compress_context
+from app.rag.hybrid_search import hybrid_search
+from app.rag.langchain_rag import create_rag_chain
+from app.rag.query_transformer import transform_query
+from app.rag.reranker import rerank_results
+
+
+def answer_customer_question(
+    db: Session,
+    question: str,
+) -> dict:
+    """
+    Complete Advanced RAG pipeline.
+
+    Flow:
+
+    Customer Question
+        ↓
+    Query Transformation
+        ↓
+    Hybrid Search
+        ↓
+    Reranking
+        ↓
+    Context Compression
+        ↓
+    LangChain + Gemini
+        ↓
+    Final Answer
+    """
+
+    if not question.strip():
+        raise ValueError("Question cannot be empty")
+
+    # -------------------------------------------------
+    # 1. Transform the customer question
+    # -------------------------------------------------
+
+    retrieval_query = transform_query(question)
+
+    # -------------------------------------------------
+    # 2. Hybrid retrieval
+    # -------------------------------------------------
+
+    retrieved_results = hybrid_search(
+        db=db,
+        query=retrieval_query,
+        top_k=5,
+    )
+
+    if not retrieved_results:
+        return {
+            "answer": (
+                "I could not find enough information "
+                "in the support knowledge base to answer "
+                "your question."
+            ),
+            "sources": [],
+        }
+
+    # -------------------------------------------------
+    # 3. Rerank retrieved results
+    # -------------------------------------------------
+
+    reranked_results = rerank_results(
+        query=question,
+        results=retrieved_results,
+        top_k=3,
+    )
+
+    # -------------------------------------------------
+    # 4. Compress context
+    # -------------------------------------------------
+
+    context = compress_context(
+        results=reranked_results,
+        max_chars=6000,
+    )
+
+    if not context:
+        return {
+            "answer": (
+                "I could not find enough information "
+                "in the support knowledge base to answer "
+                "your question."
+            ),
+            "sources": [],
+        }
+
+    # -------------------------------------------------
+    # 5. Generate answer using LangChain
+    # -------------------------------------------------
+
+    chain = create_rag_chain()
+
+    response = chain.invoke(
+        {
+            "context": context,
+            "question": question,
+        }
+    )
+    if isinstance(response.content, str):
+        answer = response.content
+    else:
+        answer = "".join(
+        item.get("text", "")
+        for item in response.content
+        if isinstance(item, dict) and item.get("type") == "text"
+    ).strip()
+    # -------------------------------------------------
+    # 6. Prepare source information
+    # -------------------------------------------------
+
+    sources = []
+
+    for result in reranked_results:
+        sources.append(
+            {
+                "chunk_id": result["chunk_id"],
+                "document_id": result["document_id"],
+                "semantic_score": round(
+                    result["semantic_score"],
+                    4,
+                ),
+                "keyword_score": round(
+                    result["keyword_score"],
+                    4,
+                ),
+                "hybrid_score": round(
+                    result["hybrid_score"],
+                    4,
+                ),
+                "rerank_score": round(
+                    result["rerank_score"],
+                    4,
+                ),
+            }
+        )
+
+    return {
+        "answer": answer,
+        "sources": sources,
+    }
+
+
+def retrieve_customer_knowledge(
+    db: Session,
+    question: str,
+) -> dict:
+    """
+    Retrieve relevant company policies and FAQs for the AI agent.
+
+    This function retrieves evidence only. It does not call an LLM
+    to generate a separate answer.
+    """
+
+    if not question.strip():
+        return {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "message": "The question cannot be empty.",
+        }
+
+    # 1. Transform the question for retrieval.
+    retrieval_query = transform_query(question)
+
+    # 2. Retrieve relevant chunks using hybrid search.
+    retrieved_results = hybrid_search(
+        db=db,
+        query=retrieval_query,
+        top_k=5,
+    )
+
+    if not retrieved_results:
+        return {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "message": (
+                "No relevant information was found "
+                "in the support knowledge base."
+            ),
+        }
+
+    # 3. Rerank the retrieved chunks.
+    reranked_results = rerank_results(
+        query=question,
+        results=retrieved_results,
+        top_k=3,
+    )
+
+    if not reranked_results:
+        return {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "message": (
+                "No sufficiently relevant knowledge chunks were found."
+            ),
+        }
+
+    # 4. Compress the evidence to fit the agent's context.
+    context = compress_context(
+        results=reranked_results,
+        max_chars=6000,
+    )
+
+    if not context or not context.strip():
+        return {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "message": (
+                "Relevant policy evidence could not be extracted."
+            ),
+        }
+
+    # 5. Return evidence and source identifiers to the agent.
+    sources = [
+        {
+            "chunk_id": result["chunk_id"],
+            "document_id": result["document_id"],
+        }
+        for result in reranked_results
+    ]
+
+    return {
+        "found": True,
+        "context": context,
+        "sources": sources,
+        "message": (
+            "Retrieved evidence from the support knowledge base. "
+            "Answer only claims supported by this evidence."
+        ),
+    }
+
+
+
+========== app\services\retriever.py ==========
+from sqlalchemy.orm import Session
+
+from app.services.semantic_search import semantic_search
+
+
+def retrieve_relevant_chunks(
+    db: Session,
+    query: str,
+    top_k: int = 3,
+    min_score: float = 0.30,
+) -> list[dict]:
+    """
+    Retrieve relevant knowledge chunks
+    above the minimum similarity score.
+    """
+
+    results = semantic_search(
+        db=db,
+        query=query,
+        top_k=top_k,
+    )
+
+    filtered_results = [
+        result
+        for result in results
+        if result["score"] >= min_score
+    ]
+
+    return filtered_results
+
+
+========== app\services\semantic_search.py ==========
+import math
+
+from sqlalchemy.orm import Session
+
+from app.models.knowledge_chunk import KnowledgeChunk
+from app.services.embedding_service import generate_embedding
+
+
+def cosine_similarity(
+    vector_a: list[float],
+    vector_b: list[float],
+) -> float:
+    """
+    Calculate cosine similarity between two vectors.
+    """
+
+    if len(vector_a) != len(vector_b):
+        raise ValueError("Vectors must have the same dimensions")
+
+    dot_product = sum(
+        a * b
+        for a, b in zip(vector_a, vector_b)
+    )
+
+    magnitude_a = math.sqrt(
+        sum(a * a for a in vector_a)
+    )
+
+    magnitude_b = math.sqrt(
+        sum(b * b for b in vector_b)
+    )
+
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+
+    return dot_product / (magnitude_a * magnitude_b)
+
+
+def semantic_search(
+    db: Session,
+    query: str,
+    top_k: int = 3,
+) -> list[dict]:
+    """
+    Find the most relevant knowledge chunks
+    for a user query.
+    """
+
+    if not query.strip():
+        raise ValueError("Query cannot be empty")
+
+    query_embedding = generate_embedding(query)
+
+    chunks = (
+        db.query(KnowledgeChunk)
+        .filter(KnowledgeChunk.embedding.isnot(None))
+        .all()
+    )
+
+    results = []
+
+    for chunk in chunks:
+        similarity = cosine_similarity(
+            query_embedding,
+            chunk.embedding,
+        )
+
+        results.append(
+            {
+                "chunk_id": chunk.id,
+                "document_id": chunk.document_id,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.content,
+                "score": similarity,
+            }
+        )
+
+    results.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+
+    return results[:top_k]
+
+
+========== app\services\ticket_service.py ==========
+from sqlalchemy.orm import Session
+
+from app.models.customer import Customer
+from app.models.ticket import Ticket
+from app.schemas.ticket import TicketCreate, TicketUpdate
+
+
+def get_customer_by_user_id(
+    db: Session,
+    user_id: int,
+) -> Customer | None:
+    """Find the customer profile linked to a user."""
+
+    return (
+        db.query(Customer)
+        .filter(Customer.user_id == user_id)
+        .first()
+    )
+
+
+def create_ticket(
+    db: Session,
+    user_id: int,
+    data: TicketCreate,
+) -> Ticket:
+    """Create a support ticket for the authenticated customer."""
+
+    customer = get_customer_by_user_id(
+        db,
+        user_id,
+    )
+
+    if not customer:
+        raise ValueError("Customer profile not found")
+
+    ticket = Ticket(
+        customer_id=customer.id,
+        subject=data.subject,
+        description=data.description,
+        priority=data.priority,
+        status="open",
+    )
+
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+
+    return ticket
+
+
+def get_customer_tickets(
+    db: Session,
+    user_id: int,
+) -> list[Ticket]:
+    """Return all tickets belonging to the authenticated customer."""
+
+    customer = get_customer_by_user_id(
+        db,
+        user_id,
+    )
+
+    if not customer:
+        raise ValueError("Customer profile not found")
+
+    return (
+        db.query(Ticket)
+        .filter(Ticket.customer_id == customer.id)
+        .order_by(Ticket.created_at.desc())
+        .all()
+    )
+
+
+def get_ticket(
+    db: Session,
+    ticket_id: int,
+    user_id: int,
+) -> Ticket | None:
+    """
+    Find a ticket only if it belongs
+    to the authenticated customer.
+    """
+
+    customer = get_customer_by_user_id(
+        db,
+        user_id,
+    )
+
+    if not customer:
+        return None
+
+    return (
+        db.query(Ticket)
+        .filter(
+            Ticket.id == ticket_id,
+            Ticket.customer_id == customer.id,
+        )
+        .first()
+    )
+
+
+def update_ticket(
+    db: Session,
+    ticket_id: int,
+    user_id: int,
+    data: TicketUpdate,
+) -> Ticket:
+    """Update customer-editable ticket fields."""
+
+    ticket = get_ticket(
+        db,
+        ticket_id,
+        user_id,
+    )
+
+    if not ticket:
+        raise ValueError("Ticket not found")
+
+    update_data = data.model_dump(
+        exclude_unset=True
+    )
+
+    for field, value in update_data.items():
+        setattr(ticket, field, value)
+
+    db.commit()
+    db.refresh(ticket)
+
+    return ticket
+
+
+========== app\tools\customer_tools.py ==========
+
+from sqlalchemy.orm import Session
+
+from app.models.customer import Customer
+from app.models.user import User
+
+
+def get_customer(
+    db: Session,
+    customer_id: int,
+) -> dict | None:
+    """Return a customer's basic profile."""
+
+    customer = (
+        db.query(Customer)
+        .filter(Customer.id == customer_id)
+        .first()
+    )
+
+    if customer is None:
+        return None
+
+    user = (
+        db.query(User)
+        .filter(User.id == customer.user_id)
+        .first()
+    )
+
+    return {
+        "customer_id": customer.id,
+        "name": customer.full_name,
+        "email": user.email if user else None,
+    }
+
+
+========== app\tools\order_tools.py ==========
+
+from sqlalchemy.orm import Session
+
+from app.models.order import Order
+
+
+def get_order(
+    db: Session,
+    order_number: str,
+    customer_id: int,
+) -> dict | None:
+    """Return an order only if it belongs to the authenticated customer."""
+
+    order = (
+        db.query(Order)
+        .filter(
+            Order.order_number == order_number.strip(),
+            Order.customer_id == customer_id,
+        )
+        .first()
+    )
+
+    if order is None:
+        return None
+
+    return {
+        "order_id": order.id,
+        "order_number": order.order_number,
+        "customer_id": order.customer_id,
+        "status": order.status,
+        "total_amount": float(order.total_amount),
+    }
+
+
+def get_order_status(
+    db: Session,
+    order_number: str,
+    customer_id: int,
+) -> str | None:
+    """Return order status only for the authenticated customer's order."""
+
+    order = (
+        db.query(Order)
+        .filter(
+            Order.order_number == order_number.strip(),
+            Order.customer_id == customer_id,
+        )
+        .first()
+    )
+
+    if order is None:
+        return None
+
+    return order.status
+
+
+========== app\tools\refund_tools.py ==========
+
+from sqlalchemy.orm import Session
+
+from app.models.order import Order
+
+
+# Refunds above this amount require human approval.
+REFUND_LIMIT_REQUIRING_APPROVAL = 10000
+
+
+def normalize_refund_reason(reason: str) -> str | None:
+    """
+    Map common customer phrases to supported refund categories.
+    """
+
+    normalized_reason = " ".join(
+        reason.lower().strip().replace("-", " ").split()
+    )
+
+    damaged_phrases = [
+        "damaged",
+        "arrived broken",
+        "broken item",
+        "product broken",
+        "product arrived damaged",
+        "item arrived damaged",
+    ]
+
+    wrong_product_phrases = [
+        "wrong product",
+        "wrong item",
+        "incorrect item",
+        "incorrect product",
+        "different product delivered",
+    ]
+
+    manufacturing_defect_phrases = [
+        "manufacturing defect",
+        "manufacturing defective",
+        "factory defect",
+        "product is defective",
+        "defective product",
+    ]
+
+    if any(
+        phrase in normalized_reason
+        for phrase in damaged_phrases
+    ):
+        return "damaged"
+
+    if any(
+        phrase in normalized_reason
+        for phrase in wrong_product_phrases
+    ):
+        return "wrong product"
+
+    if any(
+        phrase in normalized_reason
+        for phrase in manufacturing_defect_phrases
+    ):
+        return "manufacturing defect"
+
+    return None
+
+
+def check_refund_eligibility(
+    db: Session,
+    order_number: str,
+    reason: str,
+    customer_id: int,
+) -> dict:
+    """
+    Check refund eligibility using the available order data.
+
+    This tool does not create, approve, or process refunds.
+    """
+
+    # Step 1: Find the order.
+    order = (
+        db.query(Order)
+        .filter(
+            Order.order_number == order_number.strip(),
+            Order.customer_id == customer_id,
+        )
+        .first()
+    )
+
+    if order is None:
+        return {
+            "eligible": False,
+            "reason": "Order not found.",
+            "requires_human_approval": False,
+        }
+
+    # Step 2: Validate the refund reason.
+    refund_category = normalize_refund_reason(reason)
+
+    if refund_category is None:
+        return {
+            "eligible": False,
+            "reason": (
+                "The refund reason is not recognized. Supported "
+                "reasons include damaged products, wrong products, "
+                "and manufacturing defects."
+            ),
+            "requires_human_approval": False,
+            "order_number": order.order_number,
+        }
+
+    # Step 3: Verify that the order is recorded as delivered.
+    if order.status.strip().lower() != "delivered":
+        return {
+            "eligible": False,
+            "reason": (
+                "Refund eligibility cannot be confirmed because "
+                "the order is not recorded as delivered. "
+                f"Current order status: {order.status}."
+            ),
+            "requires_human_approval": False,
+            "order_number": order.order_number,
+            "refund_category": refund_category,
+        }
+
+    # Step 4: The current Order model has no delivery-date field.
+    # Do not use created_at as a substitute for delivery date.
+    return {
+        "eligible": False,
+        "reason": (
+            "The order is marked as delivered, but the system does "
+            "not store its delivery date. The 30-day refund window "
+            "cannot be verified. Delivery-date verification is "
+            "required before eligibility can be confirmed."
+        ),
+        "requires_human_approval": False,
+        "order_number": order.order_number,
+        "refund_category": refund_category,
+    }
+
+
+
+========== app\tools\ticket_tools.py ==========
+
+from sqlalchemy.orm import Session
+
+from app.models.ticket import Ticket
+
+
+def get_ticket(
+    db: Session,
+    ticket_id: int,
+    customer_id: int,
+) -> dict | None:
+    """Return a ticket only if it belongs to the authenticated customer."""
+
+    ticket = (
+        db.query(Ticket)
+        .filter(
+            Ticket.id == ticket_id,
+            Ticket.customer_id == customer_id,
+        )
+        .first()
+    )
+
+    if ticket is None:
+        return None
+
+    return {
+        "ticket_id": ticket.id,
+        "customer_id": ticket.customer_id,
+        "status": ticket.status,
+        "subject": ticket.subject,
+        "description": ticket.description,
+    }
