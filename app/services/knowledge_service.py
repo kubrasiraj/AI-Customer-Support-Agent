@@ -1,8 +1,10 @@
+
 from sqlalchemy.orm import Session
 
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.knowledge_chunk import KnowledgeChunk
 from app.services.document_parser import extract_text
+from app.services.embed_knowledge_chunks import embed_knowledge_chunks
 
 
 def split_text_into_chunks(
@@ -10,30 +12,26 @@ def split_text_into_chunks(
     chunk_size: int = 500,
     chunk_overlap: int = 50,
 ) -> list[str]:
-    """
-    Split text into smaller overlapping chunks.
-    """
+    """Split text into smaller overlapping chunks."""
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero")
+
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise ValueError(
+            "chunk_overlap must be non-negative and smaller than chunk_size"
+        )
 
     if not text.strip():
         return []
 
-    if chunk_overlap >= chunk_size:
-        raise ValueError(
-            "chunk_overlap must be smaller than chunk_size"
-        )
-
     words = text.split()
-
     chunks = []
-
     start = 0
 
     while start < len(words):
         end = start + chunk_size
-
-        chunk_words = words[start:end]
-
-        chunk = " ".join(chunk_words).strip()
+        chunk = " ".join(words[start:end]).strip()
 
         if chunk:
             chunks.append(chunk)
@@ -47,21 +45,13 @@ def process_knowledge_document(
     db: Session,
     document: KnowledgeDocument,
 ) -> int:
-    """
-    Extract text from a knowledge document,
-    split it into chunks, and save the chunks
-    in the database.
-    """
+    """Extract, chunk, embed, and process a knowledge document."""
 
-    # Mark document as processing.
     document.status = "processing"
     db.commit()
 
     try:
-        # Extract the original document text.
         text = extract_text(document.file_path)
-
-        # Split document into smaller chunks.
         chunks = split_text_into_chunks(text)
 
         if not chunks:
@@ -69,36 +59,33 @@ def process_knowledge_document(
                 "No text could be extracted from the document"
             )
 
-        # Remove old chunks if the document is being reprocessed.
         db.query(KnowledgeChunk).filter(
             KnowledgeChunk.document_id == document.id
-        ).delete(
-            synchronize_session=False
-        )
+        ).delete(synchronize_session=False)
 
-        # Save each chunk.
         for index, content in enumerate(chunks):
-            chunk = KnowledgeChunk(
-                document_id=document.id,
-                chunk_index=index,
-                content=content,
+            db.add(
+                KnowledgeChunk(
+                    document_id=document.id,
+                    chunk_index=index,
+                    content=content,
+                )
             )
 
-            db.add(chunk)
+        # Save chunks first so the embedding service can query them.
+        db.commit()
 
-        # Mark document as successfully processed.
+        # Generate and save embeddings for the document's chunks.
+        embed_knowledge_chunks(db, document.id)
+
+        # Mark as processed only after embedding succeeds.
         document.status = "processed"
-
         db.commit()
 
         return len(chunks)
 
     except Exception:
-        # Mark document as failed if anything goes wrong.
         db.rollback()
-
         document.status = "failed"
         db.commit()
-
         raise
-

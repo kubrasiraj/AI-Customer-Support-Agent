@@ -1,9 +1,12 @@
+
 from pathlib import Path
+
+from pypdf import PdfReader
 
 
 def extract_text(file_path: str) -> str:
     """
-    Read a text file and return its content.
+    Extract text from a supported TXT or PDF document.
     """
 
     path = Path(file_path)
@@ -13,13 +16,26 @@ def extract_text(file_path: str) -> str:
             f"File not found: {file_path}"
         )
 
-    text = path.read_text(
-        encoding="utf-8"
-    )
+    extension = path.suffix.lower()
+
+    if extension == ".txt":
+        text = path.read_text(encoding="utf-8")
+
+    elif extension == ".pdf":
+        reader = PdfReader(str(path))
+        text = "\n".join(
+            page.extract_text() or ""
+            for page in reader.pages
+        )
+
+    else:
+        raise ValueError(
+            "Unsupported file type. Only .txt and .pdf are supported."
+        )
 
     if not text.strip():
         raise ValueError(
-            "Document is empty"
+            "No extractable text found in document"
         )
 
     return text

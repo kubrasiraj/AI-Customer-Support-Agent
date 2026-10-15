@@ -1,19 +1,72 @@
-Refund Policy
+Demo Online Store - Delivery and Shipping Policy
+Version 1.0
 
-Customers may request a refund within 30 days of receiving an order.
+IMPORTANT: FICTIONAL SAMPLE DOCUMENT. This document was written for testing an AI customer support agent. The store, its couriers and its terms are made up. It is not the official policy of any real retailer and must not be relied on for any real purchase.
 
-A refund request is eligible when:
-1. The product arrived damaged.
-2. The wrong product was delivered.
-3. The product has a manufacturing defect.
+Applies to: orders delivered within Pakistan.
 
-Refunds are not normally available for:
-1. Change of mind after the 30-day period.
-2. Products damaged by customer misuse.
-3. Products without a valid order record.
+1. Scope and definitions
 
-Refund requests above 10,000 PKR require human approval.
+This policy describes how the fictional Demo Online Store processes and delivers orders within Pakistan.
+Business day: Monday to Friday, excluding public holidays. Saturdays and Sundays are not business days.
+Order processing: the time the store needs to check, pack and hand an order to the courier.
+Dispatch: the moment the order leaves the store's warehouse with the courier.
+Estimated delivery time: a range of business days after dispatch. It is an estimate, not a guarantee.
 
-Approved refunds are processed within 5 to 7 business days.
+2. Order processing
 
-Customers should provide their order number and a clear reason when requesting a refund.
+Order processing takes 1 to 2 business days after an order is placed. Orders placed on a weekend or public holiday begin processing on the next business day. An order is processed before it is dispatched, and delivery time is counted separately (see section 3).
+
+3. Estimated delivery times
+
+Delivery times start when the order is dispatched, not when it is placed. The estimates below do not include the 1 to 2 business days of order processing. To estimate the total time, add the processing time to the delivery time.
+
+Estimated delivery after dispatch:
+- Karachi: 2 to 4 business days.
+- Other major cities in Pakistan: 3 to 6 business days.
+- Remote areas: 5 to 8 business days.
+
+These are estimates only. The store does not guarantee a delivery date.
+
+4. Delivery tracking and order status
+
+Customers can check the current status of an order in their account or by asking the support assistant, which reads the order status recorded in the store's system. Support staff and the assistant can only report information that exists in the order record. If the record shows no courier update, the assistant should say so rather than guess where a parcel is.
+
+5. Possible delays
+
+Delivery may take longer than the estimates in section 3. Common causes include:
+- Public holidays, when the store and couriers do not operate.
+- Courier disruptions, such as high parcel volumes, vehicle or staffing shortages, or route closures.
+- Weather or road conditions that make delivery unsafe or impractical.
+- Incorrect or incomplete delivery details (see section 6).
+A delay does not by itself entitle the customer to a particular remedy. This document does not set a compensation amount for delayed orders.
+
+6. Failed delivery attempts and incomplete addresses
+
+Failed delivery attempts: If nobody is available to receive the parcel, the courier may try to contact the customer using the phone number on the order and may make a further delivery attempt. If delivery still cannot be completed, the parcel may be held or returned to the store. The customer should contact support promptly so the next step can be arranged. This document does not state the exact number of attempts.
+
+Incomplete or incorrect addresses: The customer is responsible for giving a complete address and a working phone number at checkout. An incomplete address (for example, a missing house number, area or landmark) can delay or prevent delivery. If the customer notices an error, they should contact support as early as possible, because changes may not be possible once an order has been dispatched.
+
+7. Shipping charges
+
+This document does not state a fixed shipping fee and does not state that shipping is free. Shipping charges can differ by order. The customer must verify the shipping amount shown at checkout before paying. If the checkout total does not match what the customer expected, they should contact support before completing the order.
+
+8. Customer support guidance and privacy
+
+- Have the order number ready when contacting support.
+- Support can look up only the orders that belong to the signed-in customer's own account.
+- Support will not share one customer's address, phone number or order details with another person.
+- Customers should not post full addresses, phone numbers or payment details in public places.
+- If the assistant cannot answer a question from this policy or the order record, it should say so and offer to open a support ticket.
+
+9. Information this document does not provide
+
+The following are not covered by this sample policy. A support assistant should say the information is unavailable instead of inventing an answer:
+- A fixed shipping fee, or a free-shipping minimum order amount.
+- Guaranteed delivery dates or delivery time windows.
+- The exact number of delivery attempts.
+- Compensation for late deliveries.
+- Same-day, next-day, weekend or international delivery.
+- Courier company names or tracking-number formats.
+
+End of document. Demo Online Store - Delivery and Shipping Policy, Version 1.0. Fictional sample content created for testing. It is not a real retailer's official policy.

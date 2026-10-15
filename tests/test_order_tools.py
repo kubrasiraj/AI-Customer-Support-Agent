@@ -6,6 +6,7 @@ from app.models.order import Order
 from app.tools.order_tools import get_order, get_order_status
 
 
+
 class FakeQuery:
     def __init__(self, order):
         self.order = order
@@ -17,6 +18,9 @@ class FakeQuery:
 
     def first(self):
         return self.order
+
+
+
 
 
 class FakeDB:
@@ -118,3 +122,20 @@ def test_get_order_converts_decimal_total_to_float():
 
     assert result["total_amount"] == 8500.0
     assert isinstance(result["total_amount"], float)
+
+
+def test_get_order_filters_by_authenticated_customer():
+    db = FakeDB(order=make_order())
+
+    get_order(
+        db=db,
+        order_number="ORD-123",
+        customer_id=99,
+    )
+
+    filter_text = " ".join(
+        str(condition) for condition in db.last_query.filters
+    )
+
+    assert "orders.order_number" in filter_text
+    assert "orders.customer_id" in filter_text
